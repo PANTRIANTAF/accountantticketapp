@@ -1,0 +1,16 @@
+Ticket is a module that both admins and users create and configure
+- User case
+    When a user opens a ticket he choose from a dropdown what type of ticket it is
+    On selection a call to the app is triggered to fetch a json with the fields of the ticket
+    Then the view is rendered according to this fields
+    The use rshould provide all the necessary info
+    On submit a call to the app is triggered to save tickets 
+    
+    A user can view all his closed ticket and redownload documents from a closed ticket
+    
+    
+- Admin case
+    Similar to User an admin can create a ticket
+    An admin can confirm if the value of a field in a ticket is correct, and if no, the user gets a notification to provide the correct information
+    An admin can provide a response in the ticket, if a document is created for the user, an nswer to a question etc
+    An admin is responsible to close the ticket when it is completed

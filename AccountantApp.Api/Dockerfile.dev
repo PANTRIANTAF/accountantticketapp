@@ -1,0 +1,51 @@
+# The API's DEVELOPMENT image: SDK, `dotnet watch`, and the VS Code debugger inside the container.
+# Built from the REPOSITORY ROOT (docker-compose.yml sets `context: .`), because the COPY below
+# reaches up to AccountantApp.Api/.
+#
+# This is not the production image. It runs as root, ships the SDK and a debugger, and mounts your
+# working tree. Never deploy it -- production is ../Dockerfile.
+
+FROM mcr.microsoft.com/dotnet/sdk:10.0
+
+# curl   -- the compose healthcheck, and the vsdbg installer.
+# unzip  -- the vsdbg installer unpacks with it.
+# procps -- `ps`. VS Code's ${command:pickRemoteProcess} lists processes by running `ps` through
+#           `docker exec`; without it the process picker comes back empty and the only symptom is an
+#           attach dialog with nothing in it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl unzip procps \
+ && rm -rf /var/lib/apt/lists/*
+
+# The .NET debugger. VS Code's C# extension cannot install this into a container for you when you
+# attach over a pipe -- launch.json's `debuggerPath` points at exactly this location.
+RUN curl -sSL https://aka.ms/getvsdbgsh | bash /dev/stdin -v latest -l /vsdbg
+
+WORKDIR /src
+
+# Restore at image-build time so `docker compose up` does not re-download the package graph on every
+# start. docker-compose.yml shadows bin/ and obj/ with named volumes, which are seeded from THIS
+# image's content at those paths -- that is what carries this restore past the bind mount.
+COPY AccountantApp.Api/AccountantApp.Api.csproj AccountantApp.Api/
+RUN dotnet restore AccountantApp.Api/AccountantApp.Api.csproj
+
+WORKDIR /src/AccountantApp.Api
+
+# DOTNET_USE_POLLING_FILE_WATCHER -- inotify events do not cross a Docker Desktop bind mount from a
+#   Windows host, so without this `dotnet watch` starts, reports it is watching, and never reacts to
+#   an edit. Polling is slower and it works.
+# ASPNETCORE_URLS -- 0.0.0.0, not localhost. A server bound to localhost inside a container is
+#   unreachable from the host however the port is published.
+ENV DOTNET_USE_POLLING_FILE_WATCHER=1 \
+    DOTNET_WATCH_SUPPRESS_LAUNCH_BROWSER=1 \
+    ASPNETCORE_URLS=http://+:8080
+
+EXPOSE 8080
+
+# --no-launch-profile IS REQUIRED. Properties/launchSettings.json sets
+# applicationUrl=http://localhost:5131, and `dotnet run` lets a launch profile OVERRIDE
+# ASPNETCORE_URLS -- so without this flag the API binds localhost:5131 inside the container and every
+# request from the host, and from the ui container, is refused with nothing in the log to explain it.
+#
+# --non-interactive: there is no TTY here, and `dotnet watch` otherwise waits on a keypress when it
+# hits an edit it cannot hot-reload.
+CMD ["dotnet", "watch", "--non-interactive", "run", "--no-launch-profile"]

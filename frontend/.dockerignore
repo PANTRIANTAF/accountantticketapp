@@ -1,0 +1,12 @@
+# Build context exclusions for a context of ./frontend (Dockerfile.dev only -- the production
+# Dockerfile builds from the repository root and uses the root .dockerignore).
+#
+# `node_modules` is the one that matters: the dev image runs `npm ci` itself, and the host tree
+# carries Windows-only native binaries (@esbuild/win32-x64, @rollup/rollup-win32-x64-msvc) that a
+# Linux container cannot load. It is also shadowed by an anonymous volume in docker-compose.yml, so
+# the bind mount of this directory does not put it back at run time.
+node_modules
+dist
+.vite
+*.local
+Dockerfile.dev

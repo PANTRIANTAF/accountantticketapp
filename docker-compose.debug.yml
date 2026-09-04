@@ -1,0 +1,42 @@
+# DEBUG override for docker-compose.yml. Not a stack of its own -- always both files:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.debug.yml up -d --build --wait
+#
+# .vscode/tasks.json has this as "docker: dev up (debug)", and the "Docker: Attach to API"
+# launch configuration runs it as its preLaunchTask.
+#
+# WHAT IT CHANGES, AND WHY. The default stack runs `dotnet watch`, which is two processes: the watcher
+# and the application it starts. That is right for editing and wrong for debugging, twice over --
+# VS Code's process picker shows two plausible `dotnet` entries, and a hot reload swaps the code out
+# from under an attached debugger, so breakpoints resolve against a build that is no longer running.
+#
+# So here the container builds once and runs the produced assembly as ONE process. The cost is that a
+# code change needs `docker compose restart api`; that is the trade you make by attaching.
+#
+# The healthcheck is deliberately LEFT IN PLACE, inherited from the base file. It is what makes
+# `up --wait` return only once Kestrel is actually listening, so the debugger has a process to attach
+# to. While you sit on a breakpoint the container will eventually be reported `unhealthy`, because a
+# paused process does not answer curl -- that is cosmetic, nothing acts on it, and it clears when you
+# continue.
+services:
+  api:
+    # `exec` matters: without it the shell stays as PID 1 and holds the signal, so `docker compose
+    # stop` waits out the ten-second timeout and kills the process instead of shutting it down.
+    #
+    # The `cd` matters more. SqlMigrationRunner does Path.Combine(ContentRootPath, "Slices") and
+    # ENUMERATES it -- a missing directory throws at startup rather than yielding no scripts. Running
+    # the assembly from the OUTPUT directory is also the arrangement production uses, where the
+    # csproj's <Content Include="Slices\**\Infrastructure\Migrations\*.sql"> is the only reason those
+    # scripts exist next to the binary at all. Debugging against that arrangement is the point: it is
+    # where "the app started but schema_versions is empty" would show up.
+    #
+    # `dotnet build`, never `-c Release`: vsdbg needs the Debug .pdb to bind a breakpoint to a line.
+    # A Release build attaches happily and then silently refuses every breakpoint.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        dotnet build -c Debug
+        cd bin/Debug/net10.0
+        exec dotnet AccountantApp.Api.dll

@@ -1,0 +1,12 @@
+The app will be built with the latest dotnet version
+It will be an dotnet api with a domain slice architecture
+In its slice a domain will be developed
+One api project will be used, and slice will be separated on directories
+For each slice a minimal api will be used and for each operation of the slice a handler will be creted, similar to cqrs pattern but with no mediator,commands and queries, just a handler with his interface
+Each slice will contain 
+    - a <domain>minimalapi.cs file, containing the endpoints
+    - a core directory containing the db entities of the domain
+    - An application directory containing sub directories for handlers and their models
+    - A service directory, if necessary for services operating specific works specific to this domain
+    - An infrustructure directory containing IO related operation, ie db migrations
+    - In case 2 domains should communicate, an ExternalInterface directory will be added containing a public interface for the other domain, and a private implementation of it

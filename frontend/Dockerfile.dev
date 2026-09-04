@@ -1,0 +1,29 @@
+# The SPA's DEVELOPMENT image: the Vite dev server, with hot module replacement.
+# Built with a context of ./frontend (see docker-compose.yml).
+#
+# In production the SPA is not a container at all -- it is static files inside the `app` image
+# (04-Infrastructure.md section 1). This image exists only because hot reload is worth it in
+# development (section 2).
+
+# Matches the production Dockerfile's ui stage. See the note there about why this is 22 and not the
+# node:20-alpine in 04-Infrastructure.md section 3.
+FROM node:22-alpine
+
+WORKDIR /ui
+
+# `npm ci`, not `npm install`, and the lockfile is copied with package.json so it can fail loudly if
+# they disagree. This install lives in the IMAGE; docker-compose.yml then shadows /ui/node_modules
+# with an anonymous volume so the bind mount of the host's Windows tree cannot replace it.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# Only so the image is runnable on its own. At run time docker-compose.yml bind-mounts the host
+# directory over this, which is the point -- an edit on the host reaches the dev server.
+COPY . ./
+
+EXPOSE 5173
+
+# --host 0.0.0.0 is passed here rather than set in vite.config.ts on purpose: the config is shared
+# with the host-process workflow, where binding every interface would publish the dev server to the
+# local network. In a container the port is published to 127.0.0.1 by compose, so it is contained.
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]

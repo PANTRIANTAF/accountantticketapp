@@ -1,0 +1,134 @@
+# PRODUCTION stack: caddy + app + db, from 04-Infrastructure.md section 3. The topology is LOCKED --
+# three containers, the SPA served as static files from inside `app`, and only caddy publishes a port.
+#
+#     cp .env.example .env      # then fill it in
+#     docker compose -f docker-compose.prod.yml up -d --build
+#
+# It is named docker-compose.prod.yml rather than docker-compose.yml because section 2 and section 3
+# of that document both call their file docker-compose.yml and two files cannot share a name. The
+# development stack took the default name, since it is the one run repeatedly.
+#
+# YOU CAN RUN THIS LOCALLY, and it is worth doing before deploying, because it is the only way to
+# exercise three things the development stack cannot: the SPA served from the API's wwwroot at the
+# same origin, the SameSite=Strict Secure cookie over a real TLS-terminating proxy, and Caddy's rate
+# limit on /api/auth/*. Set SITE_ADDRESS=http://localhost in .env for that -- see DOCKER.md.
+#
+# `restart: unless-stopped` on all three, so a host reboot brings the deployment back.
+
+name: accountantapp-prod
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: accountant_app
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # `backend` only, and `backend` is internal. A compromised caddy has no route to PostgreSQL
+    # because it is not attached to this network at all.
+    networks: [backend]
+    restart: unless-stopped
+    # No ports. Deliberate, and the reason `docker compose exec db psql` is how you reach it.
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Host=db;Database=accountant_app;Username=${POSTGRES_USER};Password=${POSTGRES_PASSWORD}
+
+      # NOT IN 04-Infrastructure.md SECTION 3's COMPOSE FILE, AND REQUIRED. Invitation and
+      # password-reset emails build their links from this. appsettings.json ships it blank; the code
+      # does not validate it at startup despite a comment in TokenLinks.cs claiming it does, so a
+      # missing value produces emails whose links point at "/accept-invitation?token=..." with no
+      # host -- and the token is single-use, so every person who clicks one is stuck until an
+      # administrator issues another.
+      App__BaseUrl: ${APP_BASE_URL}
+
+      # Read on first startup only, and only when no AccountantAdmin exists. There is no built-in
+      # default admin password anywhere in this application, so on an empty database the container
+      # exits at startup without these. The seeded account is forced to change its password at first
+      # login, because an environment variable is visible in `docker inspect` and in shell history.
+      Seeding__FirstAdminEmail: ${ACCOUNTANT_ADMIN_EMAIL}
+      Seeding__FirstAdminPassword: ${ACCOUNTANT_ADMIN_PASSWORD}
+
+      # The `frontend` subnet, pinned below. Program.cs builds an explicit allow-list from this and
+      # honours X-Forwarded-For from nothing else -- with the list empty it logs a warning and records
+      # caddy's address in every audit row instead of the caller's. There is deliberately no
+      # "trust any proxy" fallback: X-Forwarded-For is just a request header, so honouring it from an
+      # unknown sender would let a client write its own source IP into the audit log.
+      ForwardedHeaders__KnownNetworks__0: 172.28.0.0/16
+
+      # Turn on once an SMTP transport exists. Off, the outbox drainer marks entries Skipped and
+      # clears email_body -- which destroys invitation and reset links that cannot be regenerated.
+      # Notifications__Email__Enabled: "true"
+    volumes:
+      # REQUIRED, AND ABSENT FROM SECTION 3's COMPOSE FILE -- section 4 states the requirement
+      # ("Persist them to a mounted volume or the database") and the file there does not implement it.
+      # Without this the container refuses to start (KeyPath must be writable) or, worse in an earlier
+      # arrangement, every deploy and every restart invalidates every session. The Dockerfile creates
+      # /app/keys owned by $APP_UID so this volume inherits a writable directory.
+      - app_keys:/app/keys
+    depends_on:
+      db:
+        # SqlMigrationRunner queries before the first request, and Postgres accepts TCP for several
+        # seconds before it accepts queries.
+        condition: service_healthy
+    networks: [backend, frontend]
+    restart: unless-stopped
+    # No ports. Reachable only from caddy, over `frontend`.
+
+  caddy:
+    # Built, not the `caddy:2-alpine` in section 3. That image does NOT contain the rate_limit
+    # directive, and Caddy rejects an unknown directive at startup -- so with the stock image and the
+    # Caddyfile below, the proxy never comes up and the app is simply unreachable. Section 3
+    # anticipates this ("Requires the caddy-ratelimit plugin; if unavailable, do it in the API
+    # instead"); building the plugin in keeps the rate limit, which the README makes mandatory rather
+    # than hardening, without an API change.
+    build:
+      context: ./caddy
+    ports:
+      # The only ports in the file.
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # ACME certificates. Persist or you re-issue on every restart, and Let's Encrypt rate-limits
+      # issuance per domain per week -- a restart loop can lock you out of your own certificate.
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      # Substituted into the Caddyfile. A bare hostname makes Caddy obtain a real certificate;
+      # "http://localhost" makes it serve plain HTTP, which is what you want for a local run.
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    depends_on: [app]
+    networks: [frontend]
+    restart: unless-stopped
+
+networks:
+  backend:
+    # No route to the internet, and caddy is not on it.
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.27.0.0/16
+  frontend:
+    ipam:
+      config:
+        # Pinned so ForwardedHeaders__KnownNetworks__0 above can name it. Docker allocates from its
+        # default pool otherwise, and the allow-list would be right on one host and wrong on the next.
+        - subnet: 172.28.0.0/16
+
+volumes:
+  db_data:
+  app_keys:
+  caddy_data:
+  caddy_config:

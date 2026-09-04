@@ -1,0 +1,167 @@
+# DEVELOPMENT stack. Three containers: PostgreSQL, the API with `dotnet watch`, and the Vite dev
+# server.
+#
+#     docker compose up --build          # run everything
+#     docker compose down                # stop; the database volume survives
+#     docker compose down -v             # stop AND destroy the database
+#
+# Then open http://localhost:5173 and sign in as the seeded admin -- see DOCKER.md.
+#
+# HOW THIS RELATES TO THE SPEC. 04-Infrastructure.md section 2 describes development as "three
+# processes, not three production containers": Postgres in a container, `dotnet run` and `npm run dev`
+# on the host. That still works and nothing here breaks it -- `docker compose up db` alone gives you
+# exactly section 2. This file additionally containerises the API and the dev server, because the
+# stated requirement is to run and debug the whole thing on a machine with Docker rather than a
+# machine with the .NET SDK and Node installed. The section 2 topology is a subset of this one, not
+# a casualty of it.
+#
+# The production topology -- caddy + app + db, with the SPA served from inside the API -- is
+# docker-compose.prod.yml. Do not read this file as the deployment shape.
+
+services:
+  # -------------------------------------------------------------------------------------------
+  # PostgreSQL 16. Verbatim from 04-Infrastructure.md section 2.
+  # -------------------------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    container_name: accountantapp-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: accountant_app
+    ports:
+      # 127.0.0.1, never 0.0.0.0 (section 2). The bare "5432:5432" that most tutorials use publishes
+      # a trust-authentication database with the password `postgres` to every machine on the network,
+      # and on a laptop that means every coffee shop.
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [dev]
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------------------------
+  # The API. `dotnet watch` inside the SDK image, with vsdbg for the VS Code debugger.
+  # -------------------------------------------------------------------------------------------
+  api:
+    build:
+      # Root context: Dockerfile.dev reaches into AccountantApp.Api/ for the csproj.
+      context: .
+      dockerfile: AccountantApp.Api/Dockerfile.dev
+    # Fixed, so .vscode/launch.json's `docker exec` target is not a guess. Compose would otherwise
+    # name this accountantapp-api-1, and renaming the project silently breaks the debugger.
+    container_name: accountantapp-api
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+
+      # appsettings.Development.json points at Host=localhost, which inside this container is the
+      # container itself. Environment variables outrank appsettings, so this is the value that wins.
+      ConnectionStrings__Default: Host=db;Port=5432;Database=accountant_app;Username=postgres;Password=postgres
+
+      # A volume, not a path in the source tree. IdentityRegistration.AddDataProtection refuses to
+      # start if this is blank or unwritable, and if the keys were ephemeral every code edit that
+      # restarts the process would sign you out -- reported as "it logs me out when I save a file".
+      DataProtection__KeyPath: /keys
+
+      # The origin the BROWSER uses, because invitation and password-reset emails build their links
+      # from it. http, not the https in appsettings.Development.json: the Vite dev server serves
+      # plain HTTP and a link to https://localhost:5173 connects to nothing.
+      App__BaseUrl: http://localhost:5173
+
+      # The first Accountant Admin, created only if no AccountantAdmin exists. There is deliberately
+      # no built-in default anywhere in the application, so without these two the container exits at
+      # startup on an empty database. Development values, matching appsettings.Development.json;
+      # docker-compose.prod.yml takes them from the environment instead.
+      Seeding__FirstAdminEmail: admin@accountantapp.local
+      Seeding__FirstAdminPassword: development-admin-password
+
+      # Silences the startup warning about audit rows recording a proxy's address. The Vite dev
+      # server does not actually forward X-Forwarded-For (its proxy has xfwd off by default), so in
+      # development this changes nothing except the log -- it is set to keep the value in the same
+      # place in both compose files, so production is not the first time it is thought about.
+      ForwardedHeaders__KnownNetworks__0: 172.29.0.0/16
+    volumes:
+      # The working tree, so `dotnet watch` sees your edits.
+      - ./AccountantApp.Api:/src/AccountantApp.Api
+      # bin/ and obj/ ARE COMMITTED IN THIS REPOSITORY, so the mount above drags Windows build output
+      # into a Linux container -- a stale project.assets.json convinces the build that restore has
+      # already run and then fails on paths that do not exist here. These two named volumes shadow
+      # them with Linux output, and are seeded from the image, which carries the restore.
+      - api_obj:/src/AccountantApp.Api/obj
+      - api_bin:/src/AccountantApp.Api/bin
+      - api_keys:/keys
+      # Not required, but a rebuild of this image otherwise re-downloads the whole package graph.
+      - nuget_cache:/root/.nuget/packages
+    ports:
+      # Published so you can curl the API directly, and so `npm run dev` on the HOST can proxy to it
+      # (vite.config.ts defaults to this port). If you also run the API on the host, one of the two
+      # has to move -- that is a port clash, not a bug here.
+      - "127.0.0.1:5131:8080"
+    # A 401 is a healthy answer: it proves Kestrel is listening, the cookie middleware ran, and the
+    # pipeline reached a handler. curl without -f exits 0 for a 401, so this asserts "responds", not
+    # "responds successfully" -- the right assertion for an endpoint that requires a session.
+    # start_period covers migrations and seeding on a fresh database.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS -o /dev/null http://localhost:8080/api/auth/me"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+    depends_on:
+      db:
+        # SqlMigrationRunner connects before the first request, so "container started" is not enough:
+        # Postgres accepts TCP for several seconds before it accepts queries.
+        condition: service_healthy
+    networks: [dev]
+
+  # -------------------------------------------------------------------------------------------
+  # The Vite dev server. Proxies /api to the api container, so the browser sees ONE origin.
+  # -------------------------------------------------------------------------------------------
+  ui:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: accountantapp-ui
+    environment:
+      # Read by vite.config.ts, in the Node process, and never by the browser. This is NOT the
+      # forbidden VITE_API_URL of 04-Infrastructure.md section 2: it has no VITE_ prefix so Vite
+      # cannot expose it to client code, nothing in src/ reads import.meta.env, and the SPA still
+      # calls /api relative to its own origin. It only tells the dev server's proxy where to forward.
+      DEV_API_PROXY_TARGET: http://api:8080
+      # Bind-mounted files on Docker Desktop for Windows do not deliver inotify events, so without
+      # polling HMR never fires and the only symptom is that saving a file does nothing.
+      DEV_WATCH_POLLING: "true"
+    volumes:
+      - ./frontend:/ui
+      # Anonymous volume, and it must come AFTER the bind mount. It keeps the container's own
+      # node_modules -- installed by npm ci in the image, for Linux -- in front of the host's, whose
+      # esbuild and rollup binaries are win32-x64 and cannot be loaded here.
+      - /ui/node_modules
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      api:
+        # Not strictly required -- the proxy would just fail until the API is up -- but a dev server
+        # that answers before the API does produces a first page load full of network errors, which
+        # is indistinguishable from a real fault.
+        condition: service_healthy
+    networks: [dev]
+
+networks:
+  dev:
+    ipam:
+      config:
+        # Pinned so ForwardedHeaders__KnownNetworks__0 above can name it. Docker would otherwise pick
+        # a subnet per project and the allow-list would be wrong on another machine.
+        - subnet: 172.29.0.0/16
+
+volumes:
+  db_data:
+  api_bin:
+  api_obj:
+  api_keys:
+  nuget_cache:

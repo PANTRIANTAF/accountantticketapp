@@ -1,0 +1,54 @@
+# Reverse proxy, TLS termination and the auth rate limit. 04-Infrastructure.md section 3.
+# Mounted read-only into the caddy container by docker-compose.prod.yml.
+#
+# {$SITE_ADDRESS} comes from .env, where section 3 hard-codes accountant.example.com. It is a variable
+# for one reason: a bare hostname makes Caddy try to obtain a real certificate from Let's Encrypt,
+# which cannot succeed for a machine that is not publicly reachable on that name -- so a local
+# production-shaped run would fail at startup with an ACME error and look like a configuration
+# mistake. Set SITE_ADDRESS=http://localhost to serve plain HTTP locally; set it to the real hostname
+# in deployment and Caddy handles certificates, renewal and the HTTP->HTTPS redirect by itself.
+
+{$SITE_ADDRESS} {
+	encode gzip
+
+	# Rate limit the auth endpoints. Not hardening -- mandatory (README). Ten attempts per minute per
+	# source address across the whole /api/auth/* group, which covers login, forgot-password,
+	# reset-password and accept-invitation together, so an attacker cannot get ten tries at each.
+	#
+	# Caddy answers 429 with a plain-text body, NOT ProblemDetails -- it never reaches the API. The
+	# SPA's ErrorBanner already treats 429 as a fixed sentence for exactly this reason, and does not
+	# try to read `title` out of the body.
+	#
+	# Requires the caddy-ratelimit plugin, which is why docker-compose.prod.yml builds ./caddy rather
+	# than pulling caddy:2-alpine. Caddy REJECTS an unknown directive at startup, so on the stock
+	# image this block does not degrade -- the proxy simply never starts.
+	route /api/auth/* {
+		rate_limit {
+			zone auth {
+				key    {remote_host}
+				events 10
+				window 1m
+			}
+		}
+		reverse_proxy app:8080 {
+			# Also set here, and not only on the block below. Section 3 puts it on the general
+			# reverse_proxy only, which leaves the auth routes -- the ones that SET the session cookie
+			# -- looking like plain HTTP to the application. The cookie's SecurePolicy is Always so the
+			# flag survives that, but Request.IsHttps being false on precisely the login request is a
+			# trap left armed for whatever reads it next.
+			header_up X-Forwarded-Proto https
+		}
+	}
+
+	reverse_proxy app:8080 {
+		header_up X-Forwarded-Proto https
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "no-referrer"
+		-Server
+	}
+}

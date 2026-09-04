@@ -1,0 +1,34 @@
+{
+  // No path aliases, deliberately. Every **File:** path in every screen spec under
+  // Architect Files/UI/Screens/ is relative, and an alias makes those paths stop matching the
+  // imports a reviewer is diffing them against.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+
+    // Without strict, customerId types as string rather than string | null -- and it IS null for
+    // both Accountant roles.
+    "strict": true,
+
+    // Makes ACTIONS[action] type as possibly undefined, so can()'s `?? false` is load-bearing
+    // rather than dead code somebody deletes.
+    "noUncheckedIndexedAccess": true,
+
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+
+    // Vite emits. tsc only checks.
+    "noEmit": true
+  },
+  "include": ["src", "vite.config.ts"]
+}

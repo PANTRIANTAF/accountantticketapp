@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="10.0.0" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
+    <!-- PasswordHasher<T> needs NO PackageReference. Microsoft.AspNetCore.Identity is part of the
+         ASP.NET Core shared framework, so referencing the 2.3.1 package explicitly raises NU1510 and
+         risks resolving an older assembly than the framework's. Just `using
+         Microsoft.AspNetCore.Identity;`.
+
+         Deliberately NOT Microsoft.AspNetCore.Identity.EntityFrameworkCore, which brings its own
+         IdentityDbContext and an EF-migrations-shaped model that fights one-DbContext-per-slice, raw
+         SQL migrations, and snake_case columns at the same time. Do not use UserManager or
+         SignInManager. -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Slices\**\Infrastructure\Migrations\*.sql">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
